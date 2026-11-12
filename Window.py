@@ -4,30 +4,25 @@
 职责：
 1. 通过模板匹配在桌面/任务栏找到「王者万象棋」图标并点击，将游戏唤醒到最前面；
 2. 精准锁定游戏本体窗口（支持从最小化自动恢复，并自动排除浏览器/IDE标题干扰）；
-3. 提供 1:1 源分辨率的固定预览窗口，确保后续坐标标记不失真。
+3. 抓取画面后先 1:1 弹窗给你预览确认，确认无误后再让你命名保存（不满意可直接放弃保存）。
 """
 
 import os
 import time
+from datetime import datetime
+
 import cv2
 import mss
 import numpy as np
 import pydirectinput
 import pygetwindow as gw
 
-# 游戏窗口标题关键字（需与窗口左上角标题一致）
 GAME_TITLE = "王者万象棋"
-# 任务栏图标模板路径（用于点击唤醒最小化或在后台的游戏）
 TASKBAR_ICON = "templates/taskbar_icon.png"
 
 
 def focus_by_icon(icon_path: str = TASKBAR_ICON, threshold: float = 0.8) -> bool:
-    """
-    在全屏（含任务栏）匹配游戏图标并点击唤醒窗口。
-    :param icon_path: 图标模板图片路径
-    :param threshold: 模板匹配相似度阈值（0~1）
-    :return: 成功匹配并点击返回 True，否则返回 False
-    """
+    """在全屏（含任务栏）匹配游戏图标并点击唤醒窗口"""
     if not os.path.exists(icon_path):
         print(f"[提示] 未找到图标模板 {icon_path}，跳过图标点击。")
         return False
@@ -55,28 +50,19 @@ def focus_by_icon(icon_path: str = TASKBAR_ICON, threshold: float = 0.8) -> bool
 
 
 def find_window(title: str = GAME_TITLE) -> dict:
-    """
-    精准查找游戏本体窗口的屏幕坐标与尺寸（若游戏被最小化会自动恢复）。
-    :param title: 目标窗口标题
-    :return: 字典 {"left": 左上角X, "top": 左上角Y, "width": 宽, "height": 高}
-    """
+    """精准查找游戏本体窗口的屏幕坐标与尺寸（若游戏被最小化会自动恢复）"""
     all_wins = gw.getWindowsWithTitle(title)
-
-    # 优先精确匹配窗口标题，避免误抓到标题里也包含“王者万象棋”的浏览器或 IDE
     exact = [w for w in all_wins if w.title.strip() == title]
     pool = exact if exact else [
         w for w in all_wins
         if not any(app in w.title for app in ("Chrome", "Edge", "Firefox", "PyCharm"))
     ]
 
-    # 保留“正常大小窗口”或“处于最小化状态的窗口”（最小化时系统报告的宽高小于 200，不能提前过滤掉）
     candidates = [w for w in pool if w.isMinimized or (w.width > 200 and w.height > 200)]
     if not candidates:
         raise RuntimeError(f"没找到「{title}」游戏窗口，请确认游戏已启动。")
 
     win = max(candidates, key=lambda w: w.width * w.height)
-
-    # 如果游戏窗口处于最小化状态，先恢复显示，再读取恢复后的真实坐标和尺寸
     if win.isMinimized:
         win.restore()
         time.sleep(0.5)
@@ -91,11 +77,7 @@ def find_window(title: str = GAME_TITLE) -> dict:
 
 
 def grab_screen(rect: dict = None) -> np.ndarray:
-    """
-    截取指定游戏窗口区域画面。
-    :param rect: 窗口坐标字典；若不传则自动调用 find_window() 获取
-    :return: OpenCV 格式的 BGR 图像数组
-    """
+    """截取指定游戏窗口区域画面"""
     if rect is None:
         rect = find_window()
     with mss.MSS() as sct:
@@ -103,19 +85,38 @@ def grab_screen(rect: dict = None) -> np.ndarray:
         return cv2.cvtColor(raw, cv2.COLOR_BGRA2BGR)
 
 
-if __name__ == "__main__":
-    focus_by_icon()
+def save_sample(img: np.ndarray, name: str = "") -> str:
+    """将截图分开保存到 samples/，支持中文文件名；若不指定名称则按时间戳命名"""
+    os.makedirs("samples", exist_ok=True)
+    if not name:
+        name = datetime.now().strftime("shot_%Y%m%d_%H%M%S")
+    path = os.path.join("samples", f"{name}.png")
+    ok, buf = cv2.imencode(".png", img)
+    if not ok:
+        raise RuntimeError("图像编码 PNG 失败。")
+    buf.tofile(path)
+    return path
 
+
+if __name__ == "__main__":
+    # 1. 唤醒游戏并抓拍当前画面
+    focus_by_icon()
     rect = find_window()
     print(f"窗口坐标与尺寸：{rect}")
     img = grab_screen(rect)
+    print(f"已抓取画面，尺寸：{img.shape[1]}x{img.shape[0]}，请先预览确认...")
 
-    os.makedirs("samples", exist_ok=True)
-    cv2.imwrite("samples/test_window.png", img)
-    print(f"截图已保存至 samples/test_window.png，尺寸：{img.shape[1]}x{img.shape[0]}")
-
-    win_name = "QiHun View (Press any key to close)"
+    # 2. 先 1:1 弹窗展示抓到的画面，按任意键关闭预览后决定是否保存
+    win_name = "Preview (Press any key to confirm & name)"
     cv2.namedWindow(win_name, cv2.WINDOW_AUTOSIZE)
     cv2.imshow(win_name, img)
     cv2.waitKey(0)
     cv2.destroyAllWindows()
+
+    # 3. 确认画面没问题后，再由你手动输入名称保存（输入 n 可放弃本次截图）
+    ans = input("确认画面无误！请输入保存名称（如 对局中；输入 n 放弃保存；直接回车按时间命名）: ").strip()
+    if ans.lower() in ("n", "no", "0"):
+        print("已放弃保存本次截图。")
+    else:
+        saved_path = save_sample(img, ans)
+        print(f"截图已保存至：{saved_path}")

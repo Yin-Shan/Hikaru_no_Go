@@ -2,14 +2,14 @@
 棋魂 - 第2块积木：Mark.py
 ====================================================================
 职责：
-1. 自动扫描 samples/ 下分开保存的各界面截图，让你选择要标记哪一张（或现截一帧）；
-2. 自动记录当前标记属于哪个界面 (screen)，只显示当前界面自己的框，避免大厅和菜单的框混在一起；
-3. 将“区域名称 -> 相对窗口比例”保存到 regions.json，方便 Mouse.py 读取点击。
+1. 自动扫描 samples/ 下分开保存的各界面截图，支持连续选择多张界面进行标记，标完一张自动回到列表选下一张或退出；
+2. 自动记录当前标记属于哪个界面 (screen)，只显示当前界面自己的框，避免跨界面串框；
+3. 将“区域名称 -> 相对窗口比例”保存到 regions.json，并把带中文标签的检查图存到 marked_previews/。
 """
 
 import json
 import os
-from typing import Tuple
+from typing import Optional, Tuple
 
 import cv2
 import numpy as np
@@ -18,6 +18,7 @@ from PIL import Image, ImageDraw, ImageFont
 from Window import find_window, grab_screen
 
 SAMPLES_DIR = "samples"
+PREVIEWS_DIR = "marked_previews"
 REGIONS_PATH = "regions.json"
 
 
@@ -49,26 +50,33 @@ def imread_cn(path: str) -> np.ndarray:
     return cv2.imdecode(data, cv2.IMREAD_COLOR)
 
 
-def choose_sample_image() -> Tuple[np.ndarray, str]:
+def imwrite_cn(path: str, img: np.ndarray) -> None:
+    """兼容中文路径的图片保存"""
+    ok, buf = cv2.imencode(".png", img)
+    if not ok:
+        raise RuntimeError(f"保存图片失败：{path}")
+    buf.tofile(path)
+
+
+def choose_sample_image() -> Optional[Tuple[np.ndarray, str]]:
     """
-    列出 samples/ 目录下的所有界面截图供选择。
-    :return: (图像数组, 当前界面名称)
+    列出 samples/ 目录下的所有界面截图供选择；输入 q 退出循环。
+    :return: (图像数组, 当前界面名称)，或 None 表示退出
     """
     files = []
     if os.path.isdir(SAMPLES_DIR):
         files = sorted(f for f in os.listdir(SAMPLES_DIR) if f.lower().endswith((".png", ".jpg")))
 
-    if not files:
-        print("samples/ 目录下暂无截图，正在直接截取当前游戏窗口...")
-        return grab_screen(find_window()), "临时截图"
-
     print("\n=== 请选择要标记的界面截图 ===")
     print("  [0] 现截一张当前游戏窗口")
     for idx, fname in enumerate(files, start=1):
         print(f"  [{idx}] {fname}")
+    print("  [q] 退出标记工具")
 
-    choice = input("请输入序号（直接回车默认选最后一张）: ").strip()
-    if choice == "0":
+    choice = input("请输入序号（输入 q 退出，直接回车默认选最后一张）: ").strip()
+    if choice.lower() in ("q", "quit", "exit"):
+        return None
+    if choice == "0" or not files:
         return grab_screen(find_window()), "临时截图"
     if choice.isdigit() and 1 <= int(choice) <= len(files):
         fname = files[int(choice) - 1]
@@ -122,7 +130,7 @@ def mark_interactive(img: np.ndarray, current_screen: str) -> dict:
     regions = load_regions()
 
     print(f"\n=== 开始标记【{current_screen}】的可点击区域 ===")
-    print("操作：鼠标左键框选区域 -> 按【Enter/空格】确认 -> 在控制台输入名称；按【ESC】结束标记。\n")
+    print("操作：鼠标左键框选区域 -> 按【Enter/空格】确认 -> 在控制台输入名称；按【ESC】结束本张标记。\n")
 
     win_name = f"Mark [{current_screen}] (Enter=Confirm, ESC=Finish)"
     while True:
@@ -153,15 +161,27 @@ def mark_interactive(img: np.ndarray, current_screen: str) -> dict:
 
 
 if __name__ == "__main__":
-    base_img, cur_screen = choose_sample_image()
-    all_regions = mark_interactive(base_img, cur_screen)
+    # 循环选图标记：标完一张后自动回到列表，方便连续标多张界面或随时输入 q 退出
+    while True:
+        selected = choose_sample_image()
+        if selected is None:
+            print("已退出标记工具。")
+            break
 
-    cur_keys = [k for k, v in all_regions.items() if v.get("screen", "大厅") == cur_screen]
-    print(f"\n【{cur_screen}】当前已记录 {len(cur_keys)} 个区域：{cur_keys}")
+        base_img, cur_screen = selected
+        all_regions = mark_interactive(base_img, cur_screen)
 
-    final_vis = draw_regions(base_img, all_regions, cur_screen)
-    preview_win = f"Saved [{cur_screen}] Preview (Press any key to close)"
-    cv2.namedWindow(preview_win, cv2.WINDOW_AUTOSIZE)
-    cv2.imshow(preview_win, final_vis)
-    cv2.waitKey(0)
-    cv2.destroyAllWindows()
+        cur_keys = [k for k, v in all_regions.items() if v.get("screen", "大厅") == cur_screen]
+        print(f"\n【{cur_screen}】当前已记录 {len(cur_keys)} 个区域：{cur_keys}")
+
+        final_vis = draw_regions(base_img, all_regions, cur_screen)
+        os.makedirs(PREVIEWS_DIR, exist_ok=True)
+        preview_path = os.path.join(PREVIEWS_DIR, f"{cur_screen}_marked.png")
+        imwrite_cn(preview_path, final_vis)
+        print(f"标记检查图已保存至：{os.path.abspath(preview_path)}")
+
+        preview_win = f"Saved [{cur_screen}] Preview (Press any key to continue)"
+        cv2.namedWindow(preview_win, cv2.WINDOW_AUTOSIZE)
+        cv2.imshow(preview_win, final_vis)
+        cv2.waitKey(0)
+        cv2.destroyAllWindows()
