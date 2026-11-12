@@ -3,9 +3,9 @@
 ====================================================================
 职责（纯识别，不涉及任何点击）：
 1. 扫描 samples/ 目录下各界面截图，用 OCR 提取每个界面独有的稳定特征词；
-2. 将结果保存到 screen_features.json，支持你手动删掉玩家昵称、活动名等动态词，只保留固定 UI 词；
-3. 支持 --verify 参数：只用你精修后的 screen_features.json 跑离线自测（绝不覆盖你的手动修改）；
-4. 支持 --live 参数：用精修后的特征实时识别当前运行中的游戏画面。
+2. 将结果保存到 screen_features.json，支持手动删掉动态词，也支持配置 exclude_keywords 排除词；
+3. 按“特征词命中率”打分（解决子弹窗界面词少、被底图模式选择词多抢占误判的问题）；
+4. 支持 --verify 参数跑离线自测（不覆盖手动修改），支持 --live 参数实时监控。
 """
 
 import argparse
@@ -14,7 +14,7 @@ import os
 import re
 import time
 from collections import Counter
-from typing import Dict, List, Optional, Set
+from typing import Dict, List, Optional, Set, Tuple
 
 import cv2
 import numpy as np
@@ -98,7 +98,6 @@ def learn_from_samples(samples_dir: str = SAMPLES_DIR, rebuild: bool = False) ->
 
     print("\n=== 第2步：提炼每个界面的独有长相指纹 ===")
     for screen_name, tokens in raw_tokens.items():
-        # 若该界面已经存在于 screen_features.json 且未指定 --rebuild，保留你的手动精修结果
         if screen_name in existing:
             features[screen_name] = existing[screen_name]
             print(f"  [{screen_name}] 保留你已定义好的指纹：{features[screen_name]['unique_keywords']}")
@@ -122,21 +121,37 @@ def learn_from_samples(samples_dir: str = SAMPLES_DIR, rebuild: bool = False) ->
     return features
 
 
-def identify_screen(img: np.ndarray, features: Dict[str, dict]) -> tuple[Optional[str], List[str]]:
-    """根据 screen_features.json 判断一张图片属于哪个界面"""
+def identify_screen(img: np.ndarray, features: Dict[str, dict]) -> Tuple[Optional[str], List[str]]:
+    """
+    根据 screen_features.json 判断一张图片属于哪个界面。
+    采用“命中率 = 命中数 / 该界面总指纹数”打分，避免底图（如模式选择）词多抢占子界面（如房间码）。
+    """
     tokens = extract_tokens(img)
     full_text = " ".join(tokens)
 
     best_name: Optional[str] = None
     best_matched: List[str] = []
+    best_score: Tuple[float, int] = (0.0, 0)
 
     for screen_name, info in features.items():
+        # 若画面中出现了该界面的“排除词”，直接跳过（用于严格区分父界面与弹窗子界面）
+        excludes = info.get("exclude_keywords", [])
+        if any(ex in full_text for ex in excludes):
+            continue
+
         kws = info.get("unique_keywords", [])
+        if not kws:
+            continue
+
         need = info.get("min_hits", 2)
         matched = [kw for kw in kws if kw in full_text]
-        if len(matched) >= need and len(matched) > len(best_matched):
-            best_name = screen_name
-            best_matched = matched
+        if len(matched) >= need:
+            # 优先比命中率，命中率相同时再比命中个数
+            score = (len(matched) / len(kws), len(matched))
+            if score > best_score:
+                best_score = score
+                best_name = screen_name
+                best_matched = matched
 
     return best_name, best_matched
 
